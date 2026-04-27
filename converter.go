@@ -24,90 +24,123 @@ import (
 
 const nodeGroupPrefix = "G-"
 
-const rulesAndProvidersYAML = `
-rule-providers:
-  reject:
-    type: http
-    behavior: domain
-    url: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/reject.txt
-    path: ./ruleset/reject.yaml
-    interval: 86400
-  proxy:
-    type: http
-    behavior: domain
-    url: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/proxy.txt
-    path: ./ruleset/proxy.yaml
-    interval: 86400
-  direct:
-    type: http
-    behavior: domain
-    url: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt
-    path: ./ruleset/direct.yaml
-    interval: 86400
-  private:
-    type: http
-    behavior: domain
-    url: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/private.txt
-    path: ./ruleset/private.yaml
-    interval: 86400
-  gfw:
-    type: http
-    behavior: domain
-    url: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt
-    path: ./ruleset/gfw.yaml
-    interval: 86400
-  telegramcidr:
-    type: http
-    behavior: ipcidr
-    url: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/telegramcidr.txt
-    path: ./ruleset/telegramcidr.yaml
-    interval: 86400
-  cncidr:
-    type: http
-    behavior: ipcidr
-    url: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/cncidr.txt
-    path: ./ruleset/cncidr.yaml
-    interval: 86400
-
-rules:
-  # Loopback / link-local first: when clash-verge-rev refreshes its remote
+// loopbackRulesYAML are always emitted at the top of `rules:` so that
+// traffic to AutoConvJmsSub itself (and any other local service) never gets
+// tunneled through a proxy node.
+const loopbackRulesYAML = `  # Loopback / link-local first: when clash-verge-rev refreshes its remote
   # profile through Clash itself, requests to 127.0.0.1:25500 (AutoConvJmsSub)
   # must stay local. Without these, traffic to the local converter could be
-  # captured by other rules and tunnelled through a proxy node — wrong both
+  # captured by other rules and tunneled through a proxy node — wrong both
   # for performance and safety.
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
   - IP-CIDR6,::1/128,DIRECT,no-resolve
   - IP-CIDR6,fe80::/10,DIRECT,no-resolve
   - DOMAIN-SUFFIX,localhost,DIRECT
-  # Standard Loyalsoldier rule chain
-  - RULE-SET,private,DIRECT
-  - RULE-SET,reject,REJECT
-  - RULE-SET,direct,DIRECT
-  - RULE-SET,cncidr,DIRECT
-  - RULE-SET,proxy,PROXY
-  - RULE-SET,gfw,PROXY
-  - RULE-SET,telegramcidr,PROXY
-  - GEOIP,CN,DIRECT
+`
+
+// fallbackRulesYAML is appended when rule-providers is disabled. Minimal
+// chain: bypass CN by GeoIP, route everything else to PROXY.
+const fallbackRulesYAML = `  - GEOIP,CN,DIRECT
   - MATCH,PROXY
 `
+
+// loyalsoldierRules lists the rule files we wire up under <baseURL>/<name>.txt.
+// Each entry is (name, behavior).
+var loyalsoldierRules = []struct {
+	Name     string
+	Behavior string // "domain" or "ipcidr"
+	RuleType string // RULE-SET target — "DIRECT", "PROXY", or "REJECT"
+}{
+	{"reject", "domain", "REJECT"},
+	{"proxy", "domain", "PROXY"},
+	{"direct", "domain", "DIRECT"},
+	{"private", "domain", "DIRECT"},
+	{"gfw", "domain", "PROXY"},
+	{"telegramcidr", "ipcidr", "PROXY"},
+	{"cncidr", "ipcidr", "DIRECT"},
+}
+
+// buildRulesAndProvidersYAML produces the rule-providers + rules sections of
+// the Clash config. When `enabled` is false, only the loopback rules + a
+// minimal GEOIP fallback are emitted (no rule-providers block at all).
+func buildRulesAndProvidersYAML(enabled bool, baseURL string) string {
+	if !enabled {
+		var b strings.Builder
+		b.WriteString("\nrules:\n")
+		b.WriteString(loopbackRulesYAML)
+		b.WriteString(fallbackRulesYAML)
+		return b.String()
+	}
+
+	var b strings.Builder
+	b.WriteString("\nrule-providers:\n")
+	for _, r := range loyalsoldierRules {
+		fmt.Fprintf(&b, "  %s:\n", r.Name)
+		fmt.Fprintf(&b, "    type: http\n")
+		fmt.Fprintf(&b, "    behavior: %s\n", r.Behavior)
+		fmt.Fprintf(&b, "    url: %s/%s.txt\n", strings.TrimRight(baseURL, "/"), r.Name)
+		fmt.Fprintf(&b, "    path: ./ruleset/%s.yaml\n", r.Name)
+		fmt.Fprintf(&b, "    interval: 86400\n")
+	}
+	b.WriteString("\nrules:\n")
+	b.WriteString(loopbackRulesYAML)
+	b.WriteString("  # Standard Loyalsoldier rule chain\n")
+	// Order matters: private -> reject -> direct -> cncidr -> proxy -> gfw -> telegramcidr.
+	// First match wins; we want bypass / direct rules before proxy ones.
+	rulesOrder := []struct{ Name, Target string }{
+		{"private", "DIRECT"},
+		{"reject", "REJECT"},
+		{"direct", "DIRECT"},
+		{"cncidr", "DIRECT"},
+		{"proxy", "PROXY"},
+		{"gfw", "PROXY"},
+		{"telegramcidr", "PROXY"},
+	}
+	for _, r := range rulesOrder {
+		fmt.Fprintf(&b, "  - RULE-SET,%s,%s\n", r.Name, r.Target)
+	}
+	b.WriteString("  - GEOIP,CN,DIRECT\n")
+	b.WriteString("  - MATCH,PROXY\n")
+	return b.String()
+}
 
 // Proxy is one Clash proxy entry.
 type Proxy map[string]any
 
-// TryParseSubscription decodes a base64 subscription body and returns a
-// generated Clash YAML. Returns an error if the body is not valid base64
-// or contains no recognizable ss:// / vmess:// links.
-func TryParseSubscription(raw string) (string, error) {
-	return TryParseSubscriptionWithDefault(raw, "")
+// ConvertOptions controls the YAML generation. Zero value is safe — all
+// fields fall back to sensible defaults (rule-providers on, jsDelivr CDN,
+// no preferred default node).
+type ConvertOptions struct {
+	// DefaultProxyMatch: case-insensitive substring; matched proxy's G-<name>
+	// group is promoted to the top of the master PROXY group.
+	DefaultProxyMatch string
+	// RuleProvidersEnabled: when false, omit rule-providers entirely and
+	// emit a minimal fallback rule chain.
+	RuleProvidersEnabled bool
+	// RuleProvidersBaseURL: base URL for Loyalsoldier rule files. Each
+	// rule is fetched as `<base>/<name>.txt`. Empty = jsDelivr default.
+	RuleProvidersBaseURL string
 }
 
-// TryParseSubscriptionWithDefault is like TryParseSubscription but lets the
-// caller pin a default proxy via case-insensitive substring match. The first
-// proxy whose name contains `defaultProxyMatch` (if non-empty) gets its
-// G-<name> select group promoted to the top of the master PROXY group, so
-// Clash starts with that node selected.
-func TryParseSubscriptionWithDefault(raw, defaultProxyMatch string) (string, error) {
+const defaultLoyalsoldierBaseURL = "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release"
+
+// TryParseSubscription decodes a base64 subscription body and returns a
+// generated Clash YAML using default options (rule-providers enabled,
+// jsDelivr CDN, no preferred default node). Returns an error if the body
+// is not valid base64 or contains no recognizable ss:// / vmess:// links.
+func TryParseSubscription(raw string) (string, error) {
+	return TryParseSubscriptionWithOptions(raw, ConvertOptions{
+		RuleProvidersEnabled: true,
+		RuleProvidersBaseURL: defaultLoyalsoldierBaseURL,
+	})
+}
+
+// TryParseSubscriptionWithOptions is the full-options variant.
+func TryParseSubscriptionWithOptions(raw string, opts ConvertOptions) (string, error) {
+	if opts.RuleProvidersBaseURL == "" {
+		opts.RuleProvidersBaseURL = defaultLoyalsoldierBaseURL
+	}
 	decoded, err := decodeBase64Relaxed(strings.TrimSpace(raw))
 	if err != nil {
 		return "", fmt.Errorf("subscription body is not valid base64: %w", err)
@@ -147,7 +180,7 @@ func TryParseSubscriptionWithDefault(raw, defaultProxyMatch string) (string, err
 		return "", errors.New("no valid ss:// or vmess:// nodes found after base64 decode")
 	}
 
-	return buildClashYAML(proxies, defaultProxyMatch), nil
+	return buildClashYAML(proxies, opts), nil
 }
 
 // decodeBase64Relaxed tries Std/URL/Raw variants in turn.
@@ -381,7 +414,7 @@ func uniquify(name string, used map[string]bool) string {
 	}
 }
 
-func buildClashYAML(proxies []Proxy, defaultProxyMatch string) string {
+func buildClashYAML(proxies []Proxy, opts ConvertOptions) string {
 	groups := make([]map[string]any, 0, len(proxies)+1)
 
 	// Per-node `G-<name>` select groups.
@@ -395,12 +428,12 @@ func buildClashYAML(proxies []Proxy, defaultProxyMatch string) string {
 	}
 
 	// Master PROXY select group.
-	// First, find the index of the proxy whose name matches defaultProxyMatch
+	// First, find the index of the proxy whose name matches DefaultProxyMatch
 	// (case-insensitive substring). That node's G- group goes first, so Clash
 	// uses it as the default selection.
 	defaultIdx := -1
-	if defaultProxyMatch != "" {
-		needle := strings.ToLower(defaultProxyMatch)
+	if opts.DefaultProxyMatch != "" {
+		needle := strings.ToLower(opts.DefaultProxyMatch)
 		for i, p := range proxies {
 			if name, _ := p["name"].(string); strings.Contains(strings.ToLower(name), needle) {
 				defaultIdx = i
@@ -442,5 +475,6 @@ func buildClashYAML(proxies []Proxy, defaultProxyMatch string) string {
 	return "# Auto-generated by AutoConvJmsSub from a base64 ss/vmess subscription.\n" +
 		"# Each node has its own `G-<name>` select group so per-domain rules can route to a single node.\n" +
 		"# Default rules use Loyalsoldier rule-providers (https://github.com/Loyalsoldier/clash-rules).\n\n" +
-		string(out) + rulesAndProvidersYAML
+		string(out) +
+		buildRulesAndProvidersYAML(opts.RuleProvidersEnabled, opts.RuleProvidersBaseURL)
 }

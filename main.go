@@ -145,7 +145,11 @@ func subHandler(cfg *Config) http.HandlerFunc {
 			}
 		}
 
-		yaml, err := TryParseSubscriptionWithDefault(string(body), cfg.Defaults.DefaultProxyMatch)
+		yaml, err := TryParseSubscriptionWithOptions(string(body), ConvertOptions{
+			DefaultProxyMatch:    cfg.Defaults.DefaultProxyMatch,
+			RuleProvidersEnabled: cfg.Defaults.RuleProviders.Enabled != nil && *cfg.Defaults.RuleProviders.Enabled,
+			RuleProvidersBaseURL: cfg.Defaults.RuleProviders.BaseURL,
+		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return

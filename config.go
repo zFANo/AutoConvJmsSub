@@ -29,8 +29,25 @@ type DefaultsConfig struct {
 	// names. The first proxy that matches has its G-<name> select group
 	// promoted to the top of the master PROXY group, becoming the default
 	// selection in Clash. Empty = no preference (first-defined wins).
-	DefaultProxyMatch string `yaml:"default_proxy_match"`
+	DefaultProxyMatch string               `yaml:"default_proxy_match"`
+	RuleProviders    RuleProvidersConfig `yaml:"rule_providers"`
 }
+
+type RuleProvidersConfig struct {
+	// Enabled: when false, the generated YAML omits rule-providers entirely
+	// and falls back to a minimal hard-coded rule chain (loopback DIRECT +
+	// GEOIP CN DIRECT + MATCH PROXY). Useful when the chosen mirror is
+	// unreachable. Pointer so we can distinguish "absent" (default true)
+	// from "explicitly false".
+	Enabled *bool `yaml:"enabled"`
+	// BaseURL: where to download Loyalsoldier rule files from. Each rule
+	// (reject/proxy/direct/private/gfw/telegramcidr/cncidr) is appended as
+	// `<base>/<name>.txt`. Defaults to jsDelivr CDN; switch to a CN-friendly
+	// mirror (see config.yaml template) if jsDelivr is blocked.
+	BaseURL string `yaml:"base_url"`
+}
+
+const defaultRuleProvidersBaseURL = "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release"
 
 const configTemplate = `# AutoConvJmsSub configuration
 #
@@ -57,6 +74,19 @@ defaults:
   # becomes the default selection in Clash. Leave empty to keep
   # subscription-defined order.
   default_proxy_match: ""
+
+  # Loyalsoldier rule-providers. Set enabled: false to skip them entirely
+  # and fall back to a minimal rule chain. base_url is appended with
+  # /<name>.txt to fetch each rule list.
+  rule_providers:
+    enabled: true
+    base_url: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release
+    # CN-friendly mirrors (try if jsDelivr is unreachable):
+    #   https://fastly.jsdelivr.net/gh/Loyalsoldier/clash-rules@release
+    #   https://gcore.jsdelivr.net/gh/Loyalsoldier/clash-rules@release
+    #   https://testingcf.jsdelivr.net/gh/Loyalsoldier/clash-rules@release
+    #   https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release
+    #   https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release  (sometimes blocked in CN)
 `
 
 // LoadConfig reads the config file at `path`. If `path` is empty, the loader
@@ -95,6 +125,14 @@ func LoadConfig(path string) (*Config, string, error) {
 	}
 	if len(cfg.Subscriptions) == 0 {
 		return &cfg, resolved, fmt.Errorf("config %s: `subscriptions` is empty — add at least one entry", resolved)
+	}
+	// Default rule-providers to enabled if user did not explicitly set it.
+	if cfg.Defaults.RuleProviders.Enabled == nil {
+		t := true
+		cfg.Defaults.RuleProviders.Enabled = &t
+	}
+	if cfg.Defaults.RuleProviders.BaseURL == "" {
+		cfg.Defaults.RuleProviders.BaseURL = defaultRuleProvidersBaseURL
 	}
 
 	return &cfg, resolved, nil
