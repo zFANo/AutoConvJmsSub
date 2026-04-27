@@ -15,12 +15,21 @@ import (
 type Config struct {
 	Subscriptions map[string]string `yaml:"subscriptions"`
 	Server        ServerConfig      `yaml:"server"`
+	Defaults      DefaultsConfig    `yaml:"defaults"`
 }
 
 type ServerConfig struct {
-	Addr             string        `yaml:"addr"`
-	UpstreamTimeout  time.Duration `yaml:"upstream_timeout"`
-	UpstreamUserAgent string       `yaml:"upstream_user_agent"`
+	Addr              string        `yaml:"addr"`
+	UpstreamTimeout   time.Duration `yaml:"upstream_timeout"`
+	UpstreamUserAgent string        `yaml:"upstream_user_agent"`
+}
+
+type DefaultsConfig struct {
+	// DefaultProxyMatch: case-insensitive substring matched against proxy
+	// names. The first proxy that matches has its G-<name> select group
+	// promoted to the top of the master PROXY group, becoming the default
+	// selection in Clash. Empty = no preference (first-defined wins).
+	DefaultProxyMatch string `yaml:"default_proxy_match"`
 }
 
 const configTemplate = `# AutoConvJmsSub configuration
@@ -41,6 +50,13 @@ server:
   addr: 127.0.0.1:25500
   upstream_timeout: 30s
   upstream_user_agent: ClashforWindows/0.20.39
+
+defaults:
+  # Case-insensitive substring of a proxy name. The matched node's G-<name>
+  # group is promoted to the first slot of the master PROXY group, so it
+  # becomes the default selection in Clash. Leave empty to keep
+  # subscription-defined order.
+  default_proxy_match: ""
 `
 
 // LoadConfig reads the config file at `path`. If `path` is empty, the loader

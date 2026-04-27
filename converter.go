@@ -99,6 +99,15 @@ type Proxy map[string]any
 // generated Clash YAML. Returns an error if the body is not valid base64
 // or contains no recognizable ss:// / vmess:// links.
 func TryParseSubscription(raw string) (string, error) {
+	return TryParseSubscriptionWithDefault(raw, "")
+}
+
+// TryParseSubscriptionWithDefault is like TryParseSubscription but lets the
+// caller pin a default proxy via case-insensitive substring match. The first
+// proxy whose name contains `defaultProxyMatch` (if non-empty) gets its
+// G-<name> select group promoted to the top of the master PROXY group, so
+// Clash starts with that node selected.
+func TryParseSubscriptionWithDefault(raw, defaultProxyMatch string) (string, error) {
 	decoded, err := decodeBase64Relaxed(strings.TrimSpace(raw))
 	if err != nil {
 		return "", fmt.Errorf("subscription body is not valid base64: %w", err)
@@ -138,7 +147,7 @@ func TryParseSubscription(raw string) (string, error) {
 		return "", errors.New("no valid ss:// or vmess:// nodes found after base64 decode")
 	}
 
-	return buildClashYAML(proxies), nil
+	return buildClashYAML(proxies, defaultProxyMatch), nil
 }
 
 // decodeBase64Relaxed tries Std/URL/Raw variants in turn.
@@ -372,7 +381,7 @@ func uniquify(name string, used map[string]bool) string {
 	}
 }
 
-func buildClashYAML(proxies []Proxy) string {
+func buildClashYAML(proxies []Proxy, defaultProxyMatch string) string {
 	groups := make([]map[string]any, 0, len(proxies)+1)
 
 	// Per-node `G-<name>` select groups.
@@ -386,8 +395,28 @@ func buildClashYAML(proxies []Proxy) string {
 	}
 
 	// Master PROXY select group.
+	// First, find the index of the proxy whose name matches defaultProxyMatch
+	// (case-insensitive substring). That node's G- group goes first, so Clash
+	// uses it as the default selection.
+	defaultIdx := -1
+	if defaultProxyMatch != "" {
+		needle := strings.ToLower(defaultProxyMatch)
+		for i, p := range proxies {
+			if name, _ := p["name"].(string); strings.Contains(strings.ToLower(name), needle) {
+				defaultIdx = i
+				break
+			}
+		}
+	}
 	masterOptions := make([]string, 0, len(proxies)+2)
-	for _, p := range proxies {
+	if defaultIdx >= 0 {
+		name, _ := proxies[defaultIdx]["name"].(string)
+		masterOptions = append(masterOptions, nodeGroupPrefix+name)
+	}
+	for i, p := range proxies {
+		if i == defaultIdx {
+			continue
+		}
 		name, _ := p["name"].(string)
 		masterOptions = append(masterOptions, nodeGroupPrefix+name)
 	}
