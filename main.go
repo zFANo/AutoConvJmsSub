@@ -1,13 +1,14 @@
 // AutoConvJmsSub: a tiny local HTTP service that converts JustMySocks-style
 // base64 ss/vmess subscriptions into Clash YAML.
 //
-// Usage:
-//   AutoConvJmsSub                       # listens on 127.0.0.1:25500
-//   AutoConvJmsSub -addr 127.0.0.1:8080
-//   curl 'http://127.0.0.1:25500/sub?url=<url-encoded JMS subscription URL>'
+// Subscription URLs are read from config.yaml (created automatically on first
+// run). Then the service exposes a fixed local URL per subscription:
 //
-// In Clash Verge / Clash Meta, set the remote subscription URL to the
-// /sub?url=... endpoint above instead of the raw JMS URL.
+//   GET /sub          → returns YAML for the entry named "default"
+//   GET /sub/<name>   → returns YAML for the named entry
+//
+// Drop the URL into clash-verge-rev as a remote profile. Credentials never
+// leave config.yaml.
 package main
 
 import (
@@ -25,26 +26,36 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:25500", "listen address (use 127.0.0.1 to keep it local)")
-	timeout := flag.Duration("timeout", 30*time.Second, "upstream subscription fetch timeout")
-	ua := flag.String("ua", "ClashforWindows/0.20.39", "user-agent for upstream fetch (some providers require a clash-like UA)")
+	cfgPath := flag.String("config", "", "path to config.yaml (default: ./config.yaml or next to binary)")
 	flag.Parse()
 
+	cfg, resolved, err := LoadConfig(*cfgPath)
+	if err != nil {
+		log.Println(err)
+		os.Exit(1)
+	}
+	log.Printf("loaded config: %s", resolved)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/sub", subHandler(*timeout, *ua))
+	handler := subHandler(cfg)
+	mux.HandleFunc("/sub", handler)
+	mux.HandleFunc("/sub/", handler)
+	mux.HandleFunc("/list", listHandler(cfg))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
 
 	server := &http.Server{
-		Addr:              *addr,
+		Addr:              cfg.Server.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
-		log.Printf("AutoConvJmsSub listening on http://%s", *addr)
-		log.Printf("Usage: GET http://%s/sub?url=<url-encoded JMS subscription URL>", *addr)
+		log.Printf("AutoConvJmsSub listening on http://%s", cfg.Server.Addr)
+		log.Printf("Configured subscriptions: %s", strings.Join(subNames(cfg), ", "))
+		log.Printf("Use:  http://%s/sub            (returns 'default')", cfg.Server.Addr)
+		log.Printf("      http://%s/sub/<name>     (returns named entry)", cfg.Server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
@@ -59,14 +70,32 @@ func main() {
 	_ = server.Shutdown(ctx)
 }
 
-func subHandler(timeout time.Duration, ua string) http.HandlerFunc {
-	client := &http.Client{Timeout: timeout}
+func subNames(cfg *Config) []string {
+	names := make([]string, 0, len(cfg.Subscriptions))
+	for n := range cfg.Subscriptions {
+		names = append(names, n)
+	}
+	return names
+}
+
+func subHandler(cfg *Config) http.HandlerFunc {
+	client := &http.Client{Timeout: cfg.Server.UpstreamTimeout}
+	ua := cfg.Server.UpstreamUserAgent
 	return func(w http.ResponseWriter, r *http.Request) {
-		upstream := r.URL.Query().Get("url")
-		if upstream == "" {
-			http.Error(w, "missing 'url' query parameter", http.StatusBadRequest)
+		// Determine which named subscription to serve.
+		name := strings.TrimPrefix(r.URL.Path, "/sub")
+		name = strings.TrimPrefix(name, "/")
+		if name == "" {
+			name = "default"
+		}
+		upstream, ok := cfg.Subscriptions[name]
+		if !ok || upstream == "" {
+			http.Error(w,
+				fmt.Sprintf("subscription %q is not configured. Edit config.yaml and add it under `subscriptions:`.", name),
+				http.StatusNotFound)
 			return
 		}
+
 		req, err := http.NewRequestWithContext(r.Context(), "GET", upstream, nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -90,7 +119,7 @@ func subHandler(timeout time.Duration, ua string) http.HandlerFunc {
 			return
 		}
 
-		// Forward subscription metadata headers so the Clash client can show
+		// Forward subscription metadata headers so Clash clients can show
 		// traffic / expiry / update interval correctly.
 		for k, vs := range resp.Header {
 			kl := strings.ToLower(k)
@@ -111,7 +140,17 @@ func subHandler(timeout time.Duration, ua string) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-		w.Header().Set("Content-Disposition", `attachment; filename="jms.yaml"`)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.yaml"`, name))
 		_, _ = w.Write([]byte(yaml))
+	}
+}
+
+func listHandler(cfg *Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "Configured subscriptions:\n")
+		for _, n := range subNames(cfg) {
+			_, _ = fmt.Fprintf(w, "  http://%s/sub/%s\n", r.Host, n)
+		}
 	}
 }

@@ -1,3 +1,7 @@
+# User config — contains subscription URLs with credentials, never commit
+config.yaml
+config.local.yaml
+
 # Compiled binary
 /autoconv
 /autoconv.exe
