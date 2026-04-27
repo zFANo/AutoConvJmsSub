@@ -70,6 +70,17 @@ rule-providers:
     interval: 86400
 
 rules:
+  # Loopback / link-local first: when clash-verge-rev refreshes its remote
+  # profile through Clash itself, requests to 127.0.0.1:25500 (AutoConvJmsSub)
+  # must stay local. Without these, traffic to the local converter could be
+  # captured by other rules and tunnelled through a proxy node — wrong both
+  # for performance and safety.
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR6,::1/128,DIRECT,no-resolve
+  - IP-CIDR6,fe80::/10,DIRECT,no-resolve
+  - DOMAIN-SUFFIX,localhost,DIRECT
+  # Standard Loyalsoldier rule chain
   - RULE-SET,private,DIRECT
   - RULE-SET,reject,REJECT
   - RULE-SET,direct,DIRECT

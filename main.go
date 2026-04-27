@@ -79,7 +79,19 @@ func subNames(cfg *Config) []string {
 }
 
 func subHandler(cfg *Config) http.HandlerFunc {
-	client := &http.Client{Timeout: cfg.Server.UpstreamTimeout}
+	// Build an http.Client that explicitly bypasses any HTTP_PROXY /
+	// HTTPS_PROXY environment variable. Otherwise — when AutoConvJmsSub is
+	// launched from a shell that has those vars set to a running Clash
+	// instance — fetching the JMS subscription would route through Clash,
+	// risking circular dependency (proxy depends on the very subscription
+	// being fetched) and leaking credentials to whichever proxy node was
+	// selected. Subscription fetches must always go direct.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	client := &http.Client{
+		Timeout:   cfg.Server.UpstreamTimeout,
+		Transport: transport,
+	}
 	ua := cfg.Server.UpstreamUserAgent
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Determine which named subscription to serve.
