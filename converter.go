@@ -286,6 +286,7 @@ func parseSS(body string) (Proxy, error) {
 		"cipher":   method,
 		"password": password,
 		"udp":      true,
+		"tfo":      false,
 	}, nil
 }
 
@@ -352,15 +353,17 @@ func parseVmess(body string) (Proxy, error) {
 	}
 
 	p := Proxy{
-		"name":    name,
-		"type":    "vmess",
-		"server":  server,
-		"port":    int(port),
-		"uuid":    uuid,
-		"alterId": int(aid),
-		"cipher":  scy,
-		"udp":     true,
-		"tls":     tls == "tls",
+		"name":              name,
+		"type":              "vmess",
+		"server":            server,
+		"port":              int(port),
+		"uuid":              uuid,
+		"alterId":           int(aid),
+		"cipher":            scy,
+		"udp":               true,
+		"tls":               tls == "tls",
+		"skip-cert-verify":  true,
+		"tfo":               false,
 	}
 	if sni != "" {
 		p["servername"] = sni
