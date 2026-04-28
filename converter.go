@@ -108,6 +108,33 @@ func buildRulesAndProvidersYAML(enabled bool, baseURL string) string {
 // Proxy is one Clash proxy entry.
 type Proxy map[string]any
 
+// forceStr wraps a string in a yaml.Node with double-quoted style so the
+// YAML emitter always serialises it as a quoted string, never as a number,
+// boolean, null or other implicit type. Critical for fields like password
+// and uuid where a numeric-looking value would otherwise be parsed as int
+// by the consumer (mihomo / Clash) and the proxy would be rejected.
+func forceStr(s string) *yaml.Node {
+	return &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Tag:   "!!str",
+		Value: s,
+		Style: yaml.DoubleQuotedStyle,
+	}
+}
+
+// proxyName extracts the underlying name string from a Proxy entry,
+// regardless of whether the value is a plain string or a forceStr-wrapped
+// *yaml.Node.
+func proxyName(p Proxy) string {
+	switch v := p["name"].(type) {
+	case string:
+		return v
+	case *yaml.Node:
+		return v.Value
+	}
+	return ""
+}
+
 // ConvertOptions controls the YAML generation. Zero value is safe — all
 // fields fall back to sensible defaults (rule-providers on, jsDelivr CDN,
 // no preferred default node).
@@ -168,11 +195,11 @@ func TryParseSubscriptionWithOptions(raw string, opts ConvertOptions) (string, e
 		if perr != nil {
 			continue
 		}
-		name, _ := p["name"].(string)
+		name := proxyName(p)
 		if name == "" {
 			name = "Proxy"
 		}
-		p["name"] = uniquify(name, used)
+		p["name"] = forceStr(uniquify(name, used))
 		proxies = append(proxies, p)
 	}
 
@@ -279,12 +306,12 @@ func parseSS(body string) (Proxy, error) {
 	}
 
 	return Proxy{
-		"name":     name,
+		"name":     forceStr(name),
 		"type":     "ss",
-		"server":   host,
+		"server":   forceStr(host),
 		"port":     int(port),
-		"cipher":   method,
-		"password": password,
+		"cipher":   forceStr(method),
+		"password": forceStr(password),
 		"udp":      true,
 		"tfo":      false,
 	}, nil
@@ -353,20 +380,20 @@ func parseVmess(body string) (Proxy, error) {
 	}
 
 	p := Proxy{
-		"name":              name,
-		"type":              "vmess",
-		"server":            server,
-		"port":              int(port),
-		"uuid":              uuid,
-		"alterId":           int(aid),
-		"cipher":            scy,
-		"udp":               true,
-		"tls":               tls == "tls",
-		"skip-cert-verify":  true,
-		"tfo":               false,
+		"name":             forceStr(name),
+		"type":             "vmess",
+		"server":           forceStr(server),
+		"port":             int(port),
+		"uuid":             forceStr(uuid),
+		"alterId":          int(aid),
+		"cipher":           forceStr(scy),
+		"udp":              true,
+		"tls":              tls == "tls",
+		"skip-cert-verify": true,
+		"tfo":              false,
 	}
 	if sni != "" {
-		p["servername"] = sni
+		p["servername"] = forceStr(sni)
 	}
 
 	switch net {
@@ -421,12 +448,16 @@ func buildClashYAML(proxies []Proxy, opts ConvertOptions) string {
 	groups := make([]map[string]any, 0, len(proxies)+1)
 
 	// Per-node `G-<name>` select groups.
+	// Both group names and proxy references use forceStr because the
+	// underlying proxy names contain `@` and `:`, and we want mihomo to see
+	// them as exact-match string lookups even if a future YAML parser is
+	// stricter about unquoted scalars.
 	for _, p := range proxies {
-		name, _ := p["name"].(string)
+		name := proxyName(p)
 		groups = append(groups, map[string]any{
-			"name":    nodeGroupPrefix + name,
+			"name":    forceStr(nodeGroupPrefix + name),
 			"type":    "select",
-			"proxies": []string{name, "DIRECT", "REJECT"},
+			"proxies": []any{forceStr(name), "DIRECT", "REJECT"},
 		})
 	}
 
@@ -438,23 +469,22 @@ func buildClashYAML(proxies []Proxy, opts ConvertOptions) string {
 	if opts.DefaultProxyMatch != "" {
 		needle := strings.ToLower(opts.DefaultProxyMatch)
 		for i, p := range proxies {
-			if name, _ := p["name"].(string); strings.Contains(strings.ToLower(name), needle) {
+			if strings.Contains(strings.ToLower(proxyName(p)), needle) {
 				defaultIdx = i
 				break
 			}
 		}
 	}
-	masterOptions := make([]string, 0, len(proxies)+2)
+	masterOptions := make([]any, 0, len(proxies)+2)
 	if defaultIdx >= 0 {
-		name, _ := proxies[defaultIdx]["name"].(string)
-		masterOptions = append(masterOptions, nodeGroupPrefix+name)
+		masterOptions = append(masterOptions,
+			forceStr(nodeGroupPrefix+proxyName(proxies[defaultIdx])))
 	}
 	for i, p := range proxies {
 		if i == defaultIdx {
 			continue
 		}
-		name, _ := p["name"].(string)
-		masterOptions = append(masterOptions, nodeGroupPrefix+name)
+		masterOptions = append(masterOptions, forceStr(nodeGroupPrefix+proxyName(p)))
 	}
 	masterOptions = append(masterOptions, "DIRECT", "REJECT")
 	groups = append(groups, map[string]any{

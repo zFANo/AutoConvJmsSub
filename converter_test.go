@@ -8,6 +8,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// strField unwraps a Proxy field that may be a plain string or a forceStr-
+// wrapped *yaml.Node, returning the underlying string.
+func strField(p Proxy, key string) string {
+	switch v := p[key].(type) {
+	case string:
+		return v
+	case *yaml.Node:
+		return v.Value
+	}
+	return ""
+}
+
 func TestParseSS_SIP002(t *testing.T) {
 	// ss://YWVzLTI1Ni1nY206cGFzc3dk@1.2.3.4:8388#HK-1
 	body := "YWVzLTI1Ni1nY206cGFzc3dk@1.2.3.4:8388#HK-1"
@@ -15,19 +27,19 @@ func TestParseSS_SIP002(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSS: %v", err)
 	}
-	if got := p["name"]; got != "HK-1" {
+	if got := strField(p, "name"); got != "HK-1" {
 		t.Errorf("name = %v, want HK-1", got)
 	}
-	if got := p["server"]; got != "1.2.3.4" {
+	if got := strField(p, "server"); got != "1.2.3.4" {
 		t.Errorf("server = %v, want 1.2.3.4", got)
 	}
 	if got := p["port"]; got != 8388 {
 		t.Errorf("port = %v, want 8388", got)
 	}
-	if got := p["cipher"]; got != "aes-256-gcm" {
+	if got := strField(p, "cipher"); got != "aes-256-gcm" {
 		t.Errorf("cipher = %v, want aes-256-gcm", got)
 	}
-	if got := p["password"]; got != "passwd" {
+	if got := strField(p, "password"); got != "passwd" {
 		t.Errorf("password = %v, want passwd", got)
 	}
 }
@@ -39,7 +51,7 @@ func TestParseVmess_WS_TLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseVmess: %v", err)
 	}
-	if got := p["name"]; got != "JP-1" {
+	if got := strField(p, "name"); got != "JP-1" {
 		t.Errorf("name = %v, want JP-1", got)
 	}
 	if got := p["port"]; got != 443 {
