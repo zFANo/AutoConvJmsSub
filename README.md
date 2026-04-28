@@ -156,12 +156,78 @@ go vet ./...
 go build -o autoconv .
 ```
 
+## macOS 安装为后台服务（开机自启 + 崩溃自动重启）
+
+仓库自带 `install.sh`，跑一次即可：
+
+```bash
+./install.sh
+```
+
+它做的事（**幂等**，二次运行就是升级流程）：
+
+1. `go build` 出 `autoconv` 二进制
+2. 把二进制装到 `~/Library/Application Support/AutoConvJmsSub/autoconv`（Finder 默认隐藏 Library，不易误删）
+3. **首次安装**才拷贝 `config.yaml` 过去；二次运行**不会覆盖**你已经编辑过的 config
+4. 写 LaunchAgent plist 到 `~/Library/LaunchAgents/com.zfano.autoconvjmssub.plist`
+5. `launchctl bootstrap` 加载服务，立即开始监听 `127.0.0.1:25500`，并且：
+   - `RunAtLoad: true` — 每次登录 macOS 自动启动
+   - `KeepAlive: true` — 进程崩溃 / 被 kill 后立即重启
+   - `ProcessType: Background` — 不占用前台调度优先级
+
+成功后 clash-verge-rev 的订阅 URL 永久填：
+
+```text
+http://127.0.0.1:25500/sub
+```
+
+### 文件落点
+
+| 用途 | 路径 |
+|---|---|
+| 二进制 | `~/Library/Application Support/AutoConvJmsSub/autoconv` |
+| 配置（含凭据，权限 600） | `~/Library/Application Support/AutoConvJmsSub/config.yaml` |
+| LaunchAgent plist | `~/Library/LaunchAgents/com.zfano.autoconvjmssub.plist` |
+| stdout 日志 | `~/Library/Logs/AutoConvJmsSub.log` |
+| stderr 日志 | `~/Library/Logs/AutoConvJmsSub.err.log` |
+
+### 常用管理命令
+
+```bash
+# 看运行状态
+launchctl print gui/$(id -u)/com.zfano.autoconvjmssub | head -20
+
+# 改完 config.yaml 后重启服务
+launchctl kickstart -k gui/$(id -u)/com.zfano.autoconvjmssub
+
+# 暂时停止（关掉自启）
+launchctl bootout gui/$(id -u)/com.zfano.autoconvjmssub
+
+# 重新启用
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zfano.autoconvjmssub.plist
+
+# 看实时日志
+tail -f ~/Library/Logs/AutoConvJmsSub.log
+```
+
+### 升级（改了源码后）
+
+直接再跑一次 `./install.sh` —— 它会重编 → 覆盖二进制 → 保留 config → 重启服务。一条命令搞定。
+
+### 卸载
+
+```bash
+./uninstall.sh
+```
+
+会停掉服务、删二进制和 plist；删 `config.yaml` 之前会问一次（因为含凭据）；日志保留供你回看。
+
 ## 后续可扩展
 
 - 支持更多协议：`trojan://`、`hysteria://`、`hy2://`、`ssr://`
 - 缓存上游订阅（按 URL + TTL）
 - 配置热重载（监听 config.yaml 变化）
-- macOS launchd / Linux systemd 自启脚本
+- Linux systemd 自启脚本（目前仅 macOS launchd）
 
 ## License
 
