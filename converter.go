@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -133,6 +134,88 @@ func proxyName(p Proxy) string {
 		return v.Value
 	}
 	return ""
+}
+
+// orderedMappingNode builds a YAML mapping node whose keys are emitted in
+// the given order. Any keys present in `m` but not in `order` are appended
+// after the ordered keys, in alphabetical order, to keep the output
+// deterministic. Needed because yaml.v3 marshals map[string]any with keys
+// sorted alphabetically — fine for correctness but makes generated configs
+// look unfamiliar compared to subconverter / standard JMS converter output.
+func orderedMappingNode(m map[string]any, order []string) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	seen := make(map[string]bool, len(order))
+	addEntry := func(k string, v any) {
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: k}
+		valNode, err := toYAMLNode(v)
+		if err != nil {
+			valNode = &yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%v", v)}
+		}
+		node.Content = append(node.Content, keyNode, valNode)
+	}
+	for _, k := range order {
+		if v, ok := m[k]; ok {
+			addEntry(k, v)
+			seen[k] = true
+		}
+	}
+	extras := make([]string, 0)
+	for k := range m {
+		if !seen[k] {
+			extras = append(extras, k)
+		}
+	}
+	sort.Strings(extras)
+	for _, k := range extras {
+		addEntry(k, m[k])
+	}
+	return node
+}
+
+// toYAMLNode marshals an arbitrary Go value to a *yaml.Node. Already-built
+// *yaml.Node values pass through unchanged so forceStr() wrappers retain
+// their double-quoted style.
+func toYAMLNode(v any) (*yaml.Node, error) {
+	if n, ok := v.(*yaml.Node); ok {
+		return n, nil
+	}
+	n := &yaml.Node{}
+	if err := n.Encode(v); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+// ssFieldOrder mirrors the field order used by subconverter / standard JMS
+// converter outputs (logical-importance order, not alphabetical). `udp` is
+// kept in the output (per project requirement) and placed near `tfo` since
+// they are sibling transport-tweak booleans.
+var ssFieldOrder = []string{"name", "server", "port", "type", "cipher", "password", "udp", "tfo"}
+
+// vmessFieldOrder mirrors the standard converter output for vmess proxies.
+// `udp` is retained per project requirement. Network-specific opts
+// (ws-opts/h2-opts/grpc-opts) come last via the orderedMappingNode
+// "remaining keys" pass.
+var vmessFieldOrder = []string{
+	"name", "server", "port", "type",
+	"uuid", "alterId", "cipher",
+	"tls", "skip-cert-verify",
+	"udp", "tfo",
+	"servername", "network",
+	"ws-opts", "h2-opts", "grpc-opts",
+}
+
+// proxyFieldOrder picks the ordering for a given proxy by its `type` field.
+func proxyFieldOrder(p Proxy) []string {
+	if t, ok := p["type"].(string); ok {
+		switch t {
+		case "ss":
+			return ssFieldOrder
+		case "vmess":
+			return vmessFieldOrder
+		}
+	}
+	return nil
 }
 
 // ConvertOptions controls the YAML generation. Zero value is safe — all
@@ -307,9 +390,9 @@ func parseSS(body string) (Proxy, error) {
 
 	return Proxy{
 		"name":     forceStr(name),
-		"type":     "ss",
 		"server":   forceStr(host),
 		"port":     int(port),
+		"type":     "ss",
 		"cipher":   forceStr(method),
 		"password": forceStr(password),
 		"udp":      true,
@@ -381,15 +464,15 @@ func parseVmess(body string) (Proxy, error) {
 
 	p := Proxy{
 		"name":             forceStr(name),
-		"type":             "vmess",
 		"server":           forceStr(server),
 		"port":             int(port),
+		"type":             "vmess",
 		"uuid":             forceStr(uuid),
 		"alterId":          int(aid),
 		"cipher":           forceStr(scy),
-		"udp":              true,
 		"tls":              tls == "tls",
 		"skip-cert-verify": true,
+		"udp":              true,
 		"tfo":              false,
 	}
 	if sni != "" {
@@ -493,14 +576,25 @@ func buildClashYAML(proxies []Proxy, opts ConvertOptions) string {
 		"proxies": masterOptions,
 	})
 
-	// Marshal proxies + groups via a struct so field order is stable
-	// (gopkg.in/yaml.v3 honours struct field declaration order).
-	body := struct {
-		Proxies     []Proxy          `yaml:"proxies"`
-		ProxyGroups []map[string]any `yaml:"proxy-groups"`
-	}{Proxies: proxies, ProxyGroups: groups}
+	// Build the proxies sequence with explicit per-proxy field ordering
+	// (matches subconverter / standard JMS converter output instead of
+	// yaml.v3's default alphabetical map sort).
+	proxiesSeq := &yaml.Node{Kind: yaml.SequenceNode}
+	for _, p := range proxies {
+		proxiesSeq.Content = append(proxiesSeq.Content,
+			orderedMappingNode(p, proxyFieldOrder(p)))
+	}
+	groupsSeq, err := toYAMLNode(groups)
+	if err != nil {
+		groupsSeq = &yaml.Node{Kind: yaml.SequenceNode}
+	}
 
-	out, err := yaml.Marshal(body)
+	root := &yaml.Node{Kind: yaml.MappingNode}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "proxies"}, proxiesSeq,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "proxy-groups"}, groupsSeq,
+	)
+	out, err := yaml.Marshal(root)
 	if err != nil {
 		out = []byte(fmt.Sprintf("# yaml marshal error: %v\n", err))
 	}
