@@ -45,7 +45,7 @@ go build -ldflags "-s -w" -o autoconv .
 ok "Built $(ls -lh autoconv | awk '{print $5}') binary"
 
 # ---- 2. deploy directory --------------------------------------------------
-mkdir -p "$INSTALL_DIR" "$LOG_DIR"
+mkdir -p "$INSTALL_DIR" "$LOG_DIR" "$(dirname "$PLIST_PATH")"
 
 log "Installing binary → $INSTALL_DIR/autoconv"
 cp autoconv "$INSTALL_DIR/autoconv"
