@@ -13,9 +13,11 @@ import (
 // `/sub` endpoint returns the `default` entry, `/sub/<name>` returns the
 // named entry.
 type Config struct {
-	Subscriptions map[string]string `yaml:"subscriptions"`
-	Server        ServerConfig      `yaml:"server"`
-	Defaults      DefaultsConfig    `yaml:"defaults"`
+	Subscriptions   map[string]string `yaml:"subscriptions"`
+	Server          ServerConfig      `yaml:"server"`
+	Defaults        DefaultsConfig    `yaml:"defaults"`
+	ClashConfigFile string            `yaml:"clash_config_file"`
+	Clash           ClashConfig       `yaml:"clash"`
 }
 
 type ServerConfig struct {
@@ -29,8 +31,8 @@ type DefaultsConfig struct {
 	// names. The first proxy that matches has its G-<name> select group
 	// promoted to the top of the master PROXY group, becoming the default
 	// selection in Clash. Empty = no preference (first-defined wins).
-	DefaultProxyMatch string               `yaml:"default_proxy_match"`
-	RuleProviders    RuleProvidersConfig `yaml:"rule_providers"`
+	DefaultProxyMatch string              `yaml:"default_proxy_match"`
+	RuleProviders     RuleProvidersConfig `yaml:"rule_providers"`
 }
 
 type RuleProvidersConfig struct {
@@ -49,6 +51,31 @@ type RuleProvidersConfig struct {
 
 const defaultRuleProvidersBaseURL = "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release"
 
+type ClashConfig struct {
+	DNS          ClashDNSConfig `yaml:"dns"`
+	FakeIPFilter []string       `yaml:"fake-ip-filter"`
+	PrependRules []string       `yaml:"prepend-rules"`
+	Tun          ClashTunConfig `yaml:"tun"`
+}
+
+type ClashDNSConfig struct {
+	Enable                *bool    `yaml:"enable"`
+	Listen                string   `yaml:"listen"`
+	IPv6                  *bool    `yaml:"ipv6"`
+	EnhancedMode          string   `yaml:"enhanced-mode"`
+	FakeIPRange           string   `yaml:"fake-ip-range"`
+	FakeIPFilterMode      string   `yaml:"fake-ip-filter-mode"`
+	FakeIPFilter          []string `yaml:"fake-ip-filter"`
+	DefaultNameserver     []string `yaml:"default-nameserver"`
+	Nameserver            []string `yaml:"nameserver"`
+	ProxyServerNameserver []string `yaml:"proxy-server-nameserver"`
+	Fallback              []string `yaml:"fallback"`
+}
+
+type ClashTunConfig struct {
+	RouteExcludeAddress []string `yaml:"route-exclude-address"`
+}
+
 const configTemplate = `# AutoConvJmsSub configuration
 #
 # Each entry under "subscriptions" maps a name to an upstream subscription URL.
@@ -60,6 +87,11 @@ const configTemplate = `# AutoConvJmsSub configuration
 subscriptions:
   default: https://jmssub.net/members/getsub.php?service=YOUR_SERVICE_ID&id=YOUR_UUID
   # backup: https://jmssub.net/members/getsub.php?service=ANOTHER_ID&id=ANOTHER_UUID
+
+# Local Clash behavior lives in clash.yaml. Keep it out of git if it contains
+# personal domains, DNS servers, or TUN route settings.
+# AutoConvJmsSub also auto-loads ./clash.yaml when this is omitted.
+# clash_config_file: clash.yaml
 
 server:
   # Keep 127.0.0.1 — binding to 0.0.0.0 exposes your subscription contents
@@ -134,6 +166,9 @@ func LoadConfig(path string) (*Config, string, error) {
 	if cfg.Defaults.RuleProviders.BaseURL == "" {
 		cfg.Defaults.RuleProviders.BaseURL = defaultRuleProvidersBaseURL
 	}
+	if err := loadExternalClashConfig(&cfg, resolved); err != nil {
+		return &cfg, resolved, err
+	}
 
 	return &cfg, resolved, nil
 }
@@ -172,4 +207,87 @@ func writeTemplateConfig() (string, error) {
 		return abs, err
 	}
 	return abs, nil
+}
+
+func loadExternalClashConfig(cfg *Config, configPath string) error {
+	baseDir := filepath.Dir(configPath)
+	if cfg.ClashConfigFile != "" {
+		path := cfg.ClashConfigFile
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(baseDir, path)
+		}
+		return readClashConfigFile(path, cfg)
+	}
+
+	candidates := []string{
+		filepath.Join(baseDir, "clash.yaml"),
+	}
+	if cwd, err := filepath.Abs("clash.yaml"); err == nil {
+		candidates = append(candidates, cwd)
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "clash.yaml"))
+	}
+
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		abs, _ := filepath.Abs(candidate)
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		if _, err := os.Stat(abs); err == nil {
+			return readClashConfigFile(abs, cfg)
+		}
+	}
+	return nil
+}
+
+func readClashConfigFile(path string, cfg *Config) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read clash config %s: %w", path, err)
+	}
+
+	var wrapper struct {
+		Clash ClashConfig `yaml:"clash"`
+	}
+	if err := yaml.Unmarshal(data, &wrapper); err != nil {
+		return fmt.Errorf("parse clash config %s: %w", path, err)
+	}
+	if wrapper.Clash.hasAny() {
+		cfg.Clash = wrapper.Clash
+		return nil
+	}
+
+	var clash ClashConfig
+	if err := yaml.Unmarshal(data, &clash); err != nil {
+		return fmt.Errorf("parse clash config %s: %w", path, err)
+	}
+	cfg.Clash = clash
+	return nil
+}
+
+func (c ClashConfig) hasAny() bool {
+	return c.DNS.hasContent() ||
+		len(c.FakeIPFilter) > 0 ||
+		len(c.PrependRules) > 0 ||
+		len(c.Tun.RouteExcludeAddress) > 0
+}
+
+func (cfg *Config) ConvertOptions() ConvertOptions {
+	dns := cfg.Clash.DNS
+	if len(dns.FakeIPFilter) == 0 {
+		dns.FakeIPFilter = cfg.Clash.FakeIPFilter
+	}
+
+	opts := ConvertOptions{
+		DefaultProxyMatch:    cfg.Defaults.DefaultProxyMatch,
+		RuleProvidersEnabled: cfg.Defaults.RuleProviders.Enabled != nil && *cfg.Defaults.RuleProviders.Enabled,
+		RuleProvidersBaseURL: cfg.Defaults.RuleProviders.BaseURL,
+		DNS:                  dns,
+		PrependRules:         cfg.Clash.PrependRules,
+		Tun:                  cfg.Clash.Tun,
+	}
+	return opts
 }

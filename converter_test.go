@@ -111,6 +111,86 @@ func TestEndToEnd_GeneratesGroupsAndRules(t *testing.T) {
 	}
 }
 
+func TestEndToEnd_GeneratesProjectClashBehavior(t *testing.T) {
+	jsonBody := `{"v":"2","ps":"JP-1","add":"a.example.com","port":"443","id":"550e8400-e29b-41d4-a716-446655440000","aid":"0","net":"ws","type":"none","host":"a.example.com","path":"/ray","tls":"tls"}`
+	vmessLink := "vmess://" + base64.StdEncoding.EncodeToString([]byte(jsonBody))
+	sub := base64.StdEncoding.EncodeToString([]byte(vmessLink))
+	enabled := true
+	ipv6 := true
+
+	out, err := TryParseSubscriptionWithOptions(sub, ConvertOptions{
+		RuleProvidersEnabled: true,
+		RuleProvidersBaseURL: defaultLoyalsoldierBaseURL,
+		DNS: ClashDNSConfig{
+			Enable:                &enabled,
+			Listen:                "0.0.0.0:1053",
+			IPv6:                  &ipv6,
+			EnhancedMode:          "fake-ip",
+			FakeIPRange:           "198.18.0.1/16",
+			FakeIPFilterMode:      "blacklist",
+			FakeIPFilter:          []string{"private.example", "+.private.example", "+.tailnet.example"},
+			DefaultNameserver:     []string{"223.6.6.6", "8.8.8.8"},
+			Nameserver:            []string{"https://doh.pub/dns-query"},
+			ProxyServerNameserver: []string{"https://doh.pub/dns-query"},
+		},
+		Tun: ClashTunConfig{
+			RouteExcludeAddress: []string{"100.64.0.0/10", "203.0.113.10/32"},
+		},
+		PrependRules: []string{
+			"DOMAIN-SUFFIX,private.example,DIRECT",
+			"DOMAIN-SUFFIX,external.example,PROXY",
+		},
+	})
+	if err != nil {
+		t.Fatalf("TryParseSubscriptionWithOptions: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := yaml.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("generated yaml is invalid: %v\n%s", err, out)
+	}
+
+	dns, ok := parsed["dns"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing dns block: %#v", parsed["dns"])
+	}
+	if got := strings.Join(anyStrings(dns["nameserver"]), ","); got != "https://doh.pub/dns-query" {
+		t.Fatalf("dns.nameserver = %q, want https://doh.pub/dns-query", got)
+	}
+	if got := strings.Join(anyStrings(dns["fake-ip-filter"]), ","); !strings.Contains(got, "private.example") || !strings.Contains(got, "+.tailnet.example") {
+		t.Fatalf("dns.fake-ip-filter missing expected entries: %q", got)
+	}
+
+	tun, ok := parsed["tun"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing tun block: %#v", parsed["tun"])
+	}
+	if got := strings.Join(anyStrings(tun["route-exclude-address"]), ","); !strings.Contains(got, "203.0.113.10/32") {
+		t.Fatalf("tun.route-exclude-address missing 203.0.113.10/32: %q", got)
+	}
+
+	rules := anyStrings(parsed["rules"])
+	projectRuleIdx := indexOf(rules, "DOMAIN-SUFFIX,private.example,DIRECT")
+	providerRuleIdx := indexOf(rules, "RULE-SET,proxy,PROXY")
+	if projectRuleIdx < 0 {
+		t.Fatalf("missing project rule in rules: %#v", rules)
+	}
+	if providerRuleIdx < 0 {
+		t.Fatalf("missing provider proxy rule in rules: %#v", rules)
+	}
+	if projectRuleIdx > providerRuleIdx {
+		t.Fatalf("project rules should be emitted before provider rules")
+	}
+	for _, forbidden := range []string{
+		"IP-CIDR,198.51.100.77/32,DIRECT",
+		"IP-CIDR,203.0.113.10/32,DIRECT",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("generated yaml restored forbidden rule %q", forbidden)
+		}
+	}
+}
+
 func TestUniquify_DedupesRepeats(t *testing.T) {
 	used := map[string]bool{}
 	if got := uniquify("foo", used); got != "foo" {
@@ -134,4 +214,27 @@ func TestDecodeBase64_Relaxed(t *testing.T) {
 	if string(out) != "aes-256-gcm:passwd" {
 		t.Errorf("got %q", string(out))
 	}
+}
+
+func anyStrings(v any) []string {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func indexOf(items []string, want string) int {
+	for i, item := range items {
+		if item == want {
+			return i
+		}
+	}
+	return -1
 }

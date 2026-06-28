@@ -6,6 +6,8 @@
 #   1. Builds the autoconv binary from the current source tree.
 #   2. Copies the binary into ~/Library/Application Support/AutoConvJmsSub/.
 #   3. Copies config.yaml on first run only — never overwrites an existing one.
+#      Copies non-secret clash.yaml on every run, so profile behavior tracks
+#      the project source.
 #   4. Writes a LaunchAgent plist into ~/Library/LaunchAgents/.
 #   5. (Re)loads the launchd job. Service runs at login and auto-restarts on
 #      crash. Logs go to ~/Library/Logs/AutoConvJmsSub.{log,err.log}.
@@ -18,7 +20,7 @@
 
 set -euo pipefail
 
-LABEL="com.zfano.autoconvjmssub"
+LABEL="com.s2s.autoconvjmssub"
 INSTALL_DIR="$HOME/Library/Application Support/AutoConvJmsSub"
 PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs"
@@ -63,6 +65,15 @@ else
     fi
     chmod 600 "$INSTALL_DIR/config.yaml" 2>/dev/null || true
     ok "Config installed at $INSTALL_DIR/config.yaml — edit it to set your subscription URL"
+fi
+
+if [[ -f "$SOURCE_DIR/clash.yaml" ]]; then
+    log "Installing project Clash behavior → $INSTALL_DIR/clash.yaml"
+    cp "$SOURCE_DIR/clash.yaml" "$INSTALL_DIR/clash.yaml"
+    chmod 644 "$INSTALL_DIR/clash.yaml"
+    ok "clash.yaml installed at $INSTALL_DIR/clash.yaml"
+else
+    warn "No source clash.yaml found; generated subscriptions will omit project Clash behavior"
 fi
 
 # ---- 4. LaunchAgent plist -------------------------------------------------
@@ -149,6 +160,7 @@ cat <<EOF
 
  Edit subscription URL or settings:
      ${INSTALL_DIR}/config.yaml
+     ${INSTALL_DIR}/clash.yaml
      (then: launchctl kickstart -k ${JOB_TARGET})
 
  Tail logs:

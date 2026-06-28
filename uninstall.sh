@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-LABEL="com.zfano.autoconvjmssub"
+LABEL="com.s2s.autoconvjmssub"
 INSTALL_DIR="$HOME/Library/Application Support/AutoConvJmsSub"
 PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs"

@@ -4,8 +4,8 @@
 // Subscription URLs are read from config.yaml (created automatically on first
 // run). Then the service exposes a fixed local URL per subscription:
 //
-//   GET /sub          → returns YAML for the entry named "default"
-//   GET /sub/<name>   → returns YAML for the named entry
+//	GET /sub          → returns YAML for the entry named "default"
+//	GET /sub/<name>   → returns YAML for the named entry
 //
 // Drop the URL into clash-verge-rev as a remote profile. Credentials never
 // leave config.yaml.
@@ -145,11 +145,7 @@ func subHandler(cfg *Config) http.HandlerFunc {
 			}
 		}
 
-		yaml, err := TryParseSubscriptionWithOptions(string(body), ConvertOptions{
-			DefaultProxyMatch:    cfg.Defaults.DefaultProxyMatch,
-			RuleProvidersEnabled: cfg.Defaults.RuleProviders.Enabled != nil && *cfg.Defaults.RuleProviders.Enabled,
-			RuleProvidersBaseURL: cfg.Defaults.RuleProviders.BaseURL,
-		})
+		yaml, err := TryParseSubscriptionWithOptions(string(body), cfg.ConvertOptions())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return

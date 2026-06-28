@@ -1,8 +1,8 @@
 # AutoConvJmsSub
 
-一个本地小服务，把 JustMySocks 风格的 base64 订阅（含 `ss://` / `vmess://` 链接）转换成 Clash YAML，供 clash-verge-rev / Clash Meta 等客户端直接订阅使用。
+一个小服务，把 JustMySocks 风格的 base64 订阅（含 `ss://` / `vmess://` 链接）转换成 Clash YAML，供 clash-verge-rev / Clash Meta 等客户端直接订阅使用。
 
-订阅 URL 写在 `config.yaml` 里，**不再在 HTTP query 中传递凭据**。
+订阅 URL 写在 `config.yaml` 里，**不再在 HTTP query 中传递凭据**。本机 Clash 行为可以写在本地 `clash.yaml` 里，由订阅生成阶段直接合入。
 
 ## 工作方式
 
@@ -13,10 +13,10 @@
  └─────────────────┘ 127.0.0.1/sub  └──────────────┘                └──────────┘
                           ▲
                           │
-                  fixed local URL，无凭据
+                  fixed URL，无凭据
 ```
 
-clash-verge-rev 拉一个**固定的本地 URL**（不含任何敏感信息），AutoConvJmsSub 在后台读 `config.yaml` 拿到真订阅链接，去 JMS 抓内容、转 Clash YAML、返回。
+clash-verge-rev 拉一个**固定 URL**（不含任何敏感信息），AutoConvJmsSub 在后台读 `config.yaml` 拿到真订阅链接，去 JMS 抓内容，再把本地 `clash.yaml` 里的 DNS、fake-ip-filter、TUN route-exclude 和规则合进最终 Clash YAML。
 
 ## 快速开始
 
@@ -49,6 +49,10 @@ server:
   addr: 127.0.0.1:25500
   upstream_timeout: 30s
   upstream_user_agent: ClashforWindows/0.20.39
+
+# 本地 Clash 行为配置；如果包含个人域名、DNS、TUN 路由，请不要提交。
+# 默认会自动读取同目录的 clash.yaml；需要指定其他位置时再打开下一行。
+# clash_config_file: clash.yaml
 ```
 
 ### 4. 再次运行
@@ -64,13 +68,15 @@ server:
 
 ### 5. 在 clash-verge-rev 里订阅
 
-「新建订阅 → 远程」，URL 填：
+先关闭 Clash Verge Rev 的 **设置 → DNS 设置**，避免 Verge 用自己的 `dns_config.yaml` 覆盖订阅里的 DNS 块。
+
+然后新建远程订阅：
 
 ```text
 http://127.0.0.1:25500/sub
 ```
 
-**就这一行**，没有任何凭据。所有敏感信息留在 `config.yaml`。
+不需要再绑定 Clash 的 Merge / Rules 覆写文件。所有敏感信息留在 `config.yaml`，本机 Clash 行为规则留在本地 `clash.yaml`。
 
 ## HTTP 接口
 
@@ -101,6 +107,18 @@ curl http://127.0.0.1:25500/list
 ## 生成的 Clash 配置结构
 
 ```yaml
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-filter:
+    - private.example
+    - +.private.example
+
+tun:
+  route-exclude-address:
+    - 100.64.0.0/10
+    - 192.168.0.0/16
+
 proxies:
   - { name: HK-Premium, type: ss, server: ..., cipher: aes-256-gcm, password: ... }
   - { name: JP-Premium, type: vmess, server: ..., uuid: ..., network: ws, ... }
@@ -120,6 +138,9 @@ rule-providers:
   cncidr:       { ... behavior: ipcidr ... }
 
 rules:
+  - DOMAIN-SUFFIX,tailnet.example,DIRECT
+  - DOMAIN-SUFFIX,private.example,DIRECT
+  - DOMAIN-SUFFIX,external.example,PROXY
   - RULE-SET,private,DIRECT
   - RULE-SET,reject,REJECT
   - RULE-SET,direct,DIRECT
@@ -131,13 +152,7 @@ rules:
   - MATCH,PROXY
 ```
 
-每个节点有独立的 `G-<名字>` select 组，方便后续在 clash-verge-rev 的 Merge 配置里写自定义规则路由：
-
-```yaml
-prepend-rules:
-  - DOMAIN-SUFFIX,github.com,G-JP-Premium
-  - DOMAIN-KEYWORD,netflix,G-HK-Premium
-```
+每个节点有独立的 `G-<名字>` select 组。本机规则在 `clash.yaml` 的 `prepend-rules` 里维护，会排在 Loyalsoldier provider 规则之前。
 
 ## 安全
 
@@ -146,7 +161,9 @@ prepend-rules:
 - ✅ 不持久化任何订阅响应内容，全在内存中转换
 - ✅ 不上报任何遥测
 - ⚠️ **不要** `git add config.yaml`（已经在 `.gitignore` 中排除）
-- ⚠️ **不要**把 `addr` 改成 `0.0.0.0`，否则同网段任何人请求 `/sub` 都能拿到你的全部节点凭据
+- ⚠️ **不要** `git add clash.yaml`（已经在 `.gitignore` 中排除）；里面可能包含个人域名、DNS、TUN 路由
+- ⚠️ 本机使用时建议保持 `addr: 127.0.0.1:25500`
+- ⚠️ 部署到 NAS 并开放给内外网访问时，需要额外做访问控制；否则任何能访问端口的人都能拿到你的节点凭据
 
 ## 开发
 
@@ -169,7 +186,7 @@ go build -o autoconv .
 1. `go build` 出 `autoconv` 二进制
 2. 把二进制装到 `~/Library/Application Support/AutoConvJmsSub/autoconv`（Finder 默认隐藏 Library，不易误删）
 3. **首次安装**才拷贝 `config.yaml` 过去；二次运行**不会覆盖**你已经编辑过的 config
-4. 写 LaunchAgent plist 到 `~/Library/LaunchAgents/com.zfano.autoconvjmssub.plist`
+4. 写 LaunchAgent plist 到 `~/Library/LaunchAgents/com.s2s.autoconvjmssub.plist`
 5. `launchctl bootstrap` 加载服务，立即开始监听 `127.0.0.1:25500`，并且：
    - `RunAtLoad: true` — 每次登录 macOS 自动启动
    - `KeepAlive: true` — 进程崩溃 / 被 kill 后立即重启
@@ -181,13 +198,18 @@ go build -o autoconv .
 http://127.0.0.1:25500/sub
 ```
 
+### 私有域名 DNS
+
+如果某个私有域名在家里需要通过路由器或光猫 DNS 解析到内网地址，不要把这类家用网络规则写进本项目的 `clash.yaml`。应在当前代理客户端里把直连 DNS 改为家里的 DNS 服务器，外出时再切回公共 DNS。这样项目配置保持可审计，网络环境差异留在设备配置里处理。
+
 ### 文件落点
 
 | 用途 | 路径 |
 |---|---|
 | 二进制 | `~/Library/Application Support/AutoConvJmsSub/autoconv` |
 | 配置（含凭据，权限 600） | `~/Library/Application Support/AutoConvJmsSub/config.yaml` |
-| LaunchAgent plist | `~/Library/LaunchAgents/com.zfano.autoconvjmssub.plist` |
+| 本地 Clash 行为配置（可选） | `~/Library/Application Support/AutoConvJmsSub/clash.yaml` |
+| LaunchAgent plist | `~/Library/LaunchAgents/com.s2s.autoconvjmssub.plist` |
 | stdout 日志 | `~/Library/Logs/AutoConvJmsSub.log` |
 | stderr 日志 | `~/Library/Logs/AutoConvJmsSub.err.log` |
 
@@ -195,24 +217,24 @@ http://127.0.0.1:25500/sub
 
 ```bash
 # 看运行状态
-launchctl print gui/$(id -u)/com.zfano.autoconvjmssub | head -20
+launchctl print gui/$(id -u)/com.s2s.autoconvjmssub | head -20
 
 # 改完 config.yaml 后重启服务
-launchctl kickstart -k gui/$(id -u)/com.zfano.autoconvjmssub
+launchctl kickstart -k gui/$(id -u)/com.s2s.autoconvjmssub
 
 # 暂时停止（关掉自启）
-launchctl bootout gui/$(id -u)/com.zfano.autoconvjmssub
+launchctl bootout gui/$(id -u)/com.s2s.autoconvjmssub
 
 # 重新启用
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zfano.autoconvjmssub.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.s2s.autoconvjmssub.plist
 
 # 看实时日志
 tail -f ~/Library/Logs/AutoConvJmsSub.log
 ```
 
-### 升级（改了源码后）
+### 升级（改了源码或 `clash.yaml` 后）
 
-直接再跑一次 `./install.sh` —— 它会重编 → 覆盖二进制 → 保留 config → 重启服务。一条命令搞定。
+直接再跑一次 `./install.sh` —— 它会重编 → 覆盖二进制 → 保留含凭据的 `config.yaml` → 同步本地目录的 `clash.yaml` → 重启服务。一条命令搞定。
 
 ### 卸载
 

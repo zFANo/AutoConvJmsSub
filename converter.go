@@ -2,12 +2,12 @@
 //
 // Converts a JustMySocks-style base64 subscription (newline-separated
 // ss:// / vmess:// links) into a Clash YAML config with:
-//   * one Clash proxy per node
-//   * one `select` proxy-group per node, prefixed `G-`, containing
+//   - one Clash proxy per node
+//   - one `select` proxy-group per node, prefixed `G-`, containing
 //     [<node>, DIRECT, REJECT] — so per-domain rules can route to a
 //     single node
-//   * a master `PROXY` select group listing every per-node group
-//   * Loyalsoldier rule-providers + sensible default rule chain
+//   - a master `PROXY` select group listing every per-node group
+//   - Loyalsoldier rule-providers + sensible default rule chain
 package main
 
 import (
@@ -65,11 +65,12 @@ var loyalsoldierRules = []struct {
 // buildRulesAndProvidersYAML produces the rule-providers + rules sections of
 // the Clash config. When `enabled` is false, only the loopback rules + a
 // minimal GEOIP fallback are emitted (no rule-providers block at all).
-func buildRulesAndProvidersYAML(enabled bool, baseURL string) string {
+func buildRulesAndProvidersYAML(enabled bool, baseURL string, prependRules []string) string {
 	if !enabled {
 		var b strings.Builder
 		b.WriteString("\nrules:\n")
 		b.WriteString(loopbackRulesYAML)
+		appendPrependRules(&b, prependRules)
 		b.WriteString(fallbackRulesYAML)
 		return b.String()
 	}
@@ -86,6 +87,7 @@ func buildRulesAndProvidersYAML(enabled bool, baseURL string) string {
 	}
 	b.WriteString("\nrules:\n")
 	b.WriteString(loopbackRulesYAML)
+	appendPrependRules(&b, prependRules)
 	b.WriteString("  # Standard Loyalsoldier rule chain\n")
 	// Order matters: private -> reject -> direct -> cncidr -> proxy -> gfw -> telegramcidr.
 	// First match wins; we want bypass / direct rules before proxy ones.
@@ -104,6 +106,22 @@ func buildRulesAndProvidersYAML(enabled bool, baseURL string) string {
 	b.WriteString("  - GEOIP,CN,DIRECT\n")
 	b.WriteString("  - MATCH,PROXY\n")
 	return b.String()
+}
+
+func appendPrependRules(b *strings.Builder, rules []string) {
+	if len(rules) == 0 {
+		return
+	}
+	b.WriteString("  # Project-maintained rules\n")
+	seen := make(map[string]bool, len(rules))
+	for _, rule := range rules {
+		rule = strings.TrimSpace(rule)
+		if rule == "" || strings.HasPrefix(rule, "#") || seen[rule] {
+			continue
+		}
+		seen[rule] = true
+		fmt.Fprintf(b, "  - %s\n", rule)
+	}
 }
 
 // Proxy is one Clash proxy entry.
@@ -231,6 +249,12 @@ type ConvertOptions struct {
 	// RuleProvidersBaseURL: base URL for Loyalsoldier rule files. Each
 	// rule is fetched as `<base>/<name>.txt`. Empty = jsDelivr default.
 	RuleProvidersBaseURL string
+	// DNS is emitted as the top-level Clash `dns` block when configured.
+	DNS ClashDNSConfig
+	// Tun is emitted as the top-level Clash `tun` block when configured.
+	Tun ClashTunConfig
+	// PrependRules are emitted after loopback rules and before provider rules.
+	PrependRules []string
 }
 
 const defaultLoyalsoldierBaseURL = "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release"
@@ -590,6 +614,16 @@ func buildClashYAML(proxies []Proxy, opts ConvertOptions) string {
 	}
 
 	root := &yaml.Node{Kind: yaml.MappingNode}
+	if opts.DNS.hasContent() {
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "dns"}, buildDNSNode(opts.DNS),
+		)
+	}
+	if opts.Tun.hasContent() {
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "tun"}, buildTunNode(opts.Tun),
+		)
+	}
 	root.Content = append(root.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: "proxies"}, proxiesSeq,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: "proxy-groups"}, groupsSeq,
@@ -603,5 +637,81 @@ func buildClashYAML(proxies []Proxy, opts ConvertOptions) string {
 		"# Each node has its own `G-<name>` select group so per-domain rules can route to a single node.\n" +
 		"# Default rules use Loyalsoldier rule-providers (https://github.com/Loyalsoldier/clash-rules).\n\n" +
 		string(out) +
-		buildRulesAndProvidersYAML(opts.RuleProvidersEnabled, opts.RuleProvidersBaseURL)
+		buildRulesAndProvidersYAML(opts.RuleProvidersEnabled, opts.RuleProvidersBaseURL, opts.PrependRules)
+}
+
+func (c ClashDNSConfig) hasContent() bool {
+	return c.Enable != nil ||
+		c.Listen != "" ||
+		c.IPv6 != nil ||
+		c.EnhancedMode != "" ||
+		c.FakeIPRange != "" ||
+		c.FakeIPFilterMode != "" ||
+		len(c.FakeIPFilter) > 0 ||
+		len(c.DefaultNameserver) > 0 ||
+		len(c.Nameserver) > 0 ||
+		len(c.ProxyServerNameserver) > 0 ||
+		len(c.Fallback) > 0
+}
+
+func buildDNSNode(c ClashDNSConfig) *yaml.Node {
+	m := map[string]any{}
+	if c.Enable != nil {
+		m["enable"] = *c.Enable
+	}
+	if c.Listen != "" {
+		m["listen"] = c.Listen
+	}
+	if c.IPv6 != nil {
+		m["ipv6"] = *c.IPv6
+	}
+	if c.EnhancedMode != "" {
+		m["enhanced-mode"] = c.EnhancedMode
+	}
+	if c.FakeIPRange != "" {
+		m["fake-ip-range"] = c.FakeIPRange
+	}
+	if c.FakeIPFilterMode != "" {
+		m["fake-ip-filter-mode"] = c.FakeIPFilterMode
+	}
+	if len(c.FakeIPFilter) > 0 {
+		m["fake-ip-filter"] = c.FakeIPFilter
+	}
+	if len(c.DefaultNameserver) > 0 {
+		m["default-nameserver"] = c.DefaultNameserver
+	}
+	if len(c.Nameserver) > 0 {
+		m["nameserver"] = c.Nameserver
+	}
+	if len(c.ProxyServerNameserver) > 0 {
+		m["proxy-server-nameserver"] = c.ProxyServerNameserver
+	}
+	if len(c.Fallback) > 0 {
+		m["fallback"] = c.Fallback
+	}
+	return orderedMappingNode(m, []string{
+		"enable",
+		"listen",
+		"ipv6",
+		"enhanced-mode",
+		"fake-ip-range",
+		"fake-ip-filter-mode",
+		"fake-ip-filter",
+		"default-nameserver",
+		"nameserver",
+		"proxy-server-nameserver",
+		"fallback",
+	})
+}
+
+func (c ClashTunConfig) hasContent() bool {
+	return len(c.RouteExcludeAddress) > 0
+}
+
+func buildTunNode(c ClashTunConfig) *yaml.Node {
+	m := map[string]any{}
+	if len(c.RouteExcludeAddress) > 0 {
+		m["route-exclude-address"] = c.RouteExcludeAddress
+	}
+	return orderedMappingNode(m, []string{"route-exclude-address"})
 }

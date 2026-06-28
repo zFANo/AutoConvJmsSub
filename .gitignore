@@ -2,6 +2,9 @@
 config.yaml
 config.local.yaml
 
+# Local Clash profile — personal DNS/TUN/route data, keep out of the repo
+clash.yaml
+
 # Compiled binary
 /autoconv
 /autoconv.exe
