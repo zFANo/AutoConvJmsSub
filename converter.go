@@ -223,6 +223,19 @@ var vmessFieldOrder = []string{
 	"ws-opts", "h2-opts", "grpc-opts",
 }
 
+// vlessFieldOrder mirrors the standard converter output for vless proxies.
+// No `cipher`/`alterId` — VLESS has neither. Transport-specific opts
+// (reality-opts/ws-opts/grpc-opts/h2-opts) come last via the
+// orderedMappingNode "remaining keys" pass.
+var vlessFieldOrder = []string{
+	"name", "server", "port", "type",
+	"uuid", "flow",
+	"tls", "skip-cert-verify",
+	"udp", "tfo",
+	"servername", "client-fingerprint", "alpn", "network",
+	"reality-opts", "ws-opts", "grpc-opts", "h2-opts",
+}
+
 // proxyFieldOrder picks the ordering for a given proxy by its `type` field.
 func proxyFieldOrder(p Proxy) []string {
 	if t, ok := p["type"].(string); ok {
@@ -231,6 +244,8 @@ func proxyFieldOrder(p Proxy) []string {
 			return ssFieldOrder
 		case "vmess":
 			return vmessFieldOrder
+		case "vless":
+			return vlessFieldOrder
 		}
 	}
 	return nil
@@ -296,6 +311,8 @@ func TryParseSubscriptionWithOptions(raw string, opts ConvertOptions) (string, e
 			p, perr = parseSS(strings.TrimPrefix(line, "ss://"))
 		case strings.HasPrefix(line, "vmess://"):
 			p, perr = parseVmess(strings.TrimPrefix(line, "vmess://"))
+		case strings.HasPrefix(line, "vless://"):
+			p, perr = parseVless(strings.TrimPrefix(line, "vless://"))
 		default:
 			continue
 		}
@@ -342,6 +359,24 @@ func decodeBase64Relaxed(s string) ([]byte, error) {
 	return nil, lastErr
 }
 
+// udpDeclaration reads a subscription-provided UDP flag. The second return
+// value reports whether the subscription said anything at all — callers must
+// leave the Clash `udp` key out entirely when it is false, so the node
+// inherits the core's default instead of us asserting a capability the
+// upstream never advertised.
+//
+// None of ss/vmess/vless carry UDP support in their link standard, so this
+// only fires for the non-standard `udp=` extension some providers emit.
+func udpDeclaration(raw string) (value bool, present bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	}
+	return false, false
+}
+
 func parseSS(body string) (Proxy, error) {
 	// Split off `#name` fragment first.
 	var name string
@@ -350,8 +385,13 @@ func parseSS(body string) (Proxy, error) {
 		name = decoded
 		body = body[:i]
 	}
-	// Drop `?plugin=...` query (plugin not supported here).
+	// Strip the query off the connection details. `plugin=...` is not
+	// supported here and is discarded; `udp=` is read below.
+	var query url.Values
 	if i := strings.Index(body, "?"); i >= 0 {
+		if parsed, err := url.ParseQuery(body[i+1:]); err == nil {
+			query = parsed
+		}
 		body = body[:i]
 	}
 
@@ -412,16 +452,19 @@ func parseSS(body string) (Proxy, error) {
 		name = fmt.Sprintf("%s:%d", host, port)
 	}
 
-	return Proxy{
+	p := Proxy{
 		"name":     forceStr(name),
 		"server":   forceStr(host),
 		"port":     int(port),
 		"type":     "ss",
 		"cipher":   forceStr(method),
 		"password": forceStr(password),
-		"udp":      true,
 		"tfo":      false,
-	}, nil
+	}
+	if val, present := udpDeclaration(query.Get("udp")); present {
+		p["udp"] = val
+	}
+	return p, nil
 }
 
 func parseVmess(body string) (Proxy, error) {
@@ -496,8 +539,19 @@ func parseVmess(body string) (Proxy, error) {
 		"cipher":           forceStr(scy),
 		"tls":              tls == "tls",
 		"skip-cert-verify": true,
-		"udp":              true,
 		"tfo":              false,
+	}
+	// v2rayN-style vmess JSON has no standard UDP field; honour it only when
+	// a provider adds the non-standard extension.
+	switch v := raw["udp"].(type) {
+	case bool:
+		p["udp"] = v
+	case float64:
+		p["udp"] = v != 0
+	case string:
+		if val, present := udpDeclaration(v); present {
+			p["udp"] = val
+		}
 	}
 	if sni != "" {
 		p["servername"] = forceStr(sni)
@@ -529,6 +583,154 @@ func parseVmess(body string) (Proxy, error) {
 		}
 		if host != "" {
 			h2["host"] = []string{host}
+		}
+		if len(h2) > 0 {
+			p["h2-opts"] = h2
+		}
+	}
+	return p, nil
+}
+
+// parseVless converts a `vless://` link body (everything after the scheme)
+// into a mihomo vless proxy.
+//
+// Shape: vless://<uuid>@<host>:<port>?<params>#<name>
+//
+// Unlike vmess, VLESS has no encryption of its own — `encryption=none` is the
+// only legal value — so there is deliberately no `cipher` field here. The
+// `security` param selects the outer transport instead: `reality` or `tls`
+// both mean the proxy runs over TLS, and REALITY additionally needs the
+// server's public key / short-id under `reality-opts`.
+func parseVless(body string) (Proxy, error) {
+	// Split off the `#name` fragment first, then the `?query`.
+	var name string
+	if i := strings.LastIndex(body, "#"); i >= 0 {
+		decoded, err := url.QueryUnescape(body[i+1:])
+		if err != nil {
+			decoded = body[i+1:]
+		}
+		name = decoded
+		body = body[:i]
+	}
+	var query url.Values
+	if i := strings.Index(body, "?"); i >= 0 {
+		parsed, err := url.ParseQuery(body[i+1:])
+		if err != nil {
+			return nil, fmt.Errorf("vless query: %w", err)
+		}
+		query = parsed
+		body = body[:i]
+	}
+
+	at := strings.LastIndex(body, "@")
+	if at < 0 {
+		return nil, errors.New("vless missing '@'")
+	}
+	uuid := body[:at]
+	if uuid == "" {
+		return nil, errors.New("vless missing uuid")
+	}
+	hostPort := body[at+1:]
+	colon := strings.LastIndex(hostPort, ":")
+	if colon < 0 {
+		return nil, errors.New("vless host:port malformed")
+	}
+	host := hostPort[:colon]
+	if host == "" {
+		return nil, errors.New("vless missing server")
+	}
+	port, err := strconv.ParseUint(hostPort[colon+1:], 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("vless port: %w", err)
+	}
+	if name == "" {
+		name = fmt.Sprintf("%s:%d", host, port)
+	}
+
+	network := query.Get("type")
+	if network == "" {
+		network = "tcp"
+	}
+	security := strings.ToLower(query.Get("security"))
+	isReality := security == "reality"
+
+	p := Proxy{
+		"name":    forceStr(name),
+		"server":  forceStr(host),
+		"port":    int(port),
+		"type":    "vless",
+		"uuid":    forceStr(uuid),
+		"tls":     security == "tls" || security == "xtls" || isReality,
+		"tfo":     false,
+		"network": network,
+	}
+	if val, present := udpDeclaration(query.Get("udp")); present {
+		p["udp"] = val
+	}
+
+	if flow := query.Get("flow"); flow != "" {
+		p["flow"] = forceStr(flow)
+	}
+	if sni := query.Get("sni"); sni != "" {
+		p["servername"] = forceStr(sni)
+	}
+	if fp := query.Get("fp"); fp != "" {
+		p["client-fingerprint"] = forceStr(fp)
+	}
+	if alpn := query.Get("alpn"); alpn != "" {
+		items := []string{}
+		for _, item := range strings.Split(alpn, ",") {
+			if item = strings.TrimSpace(item); item != "" {
+				items = append(items, item)
+			}
+		}
+		if len(items) > 0 {
+			p["alpn"] = items
+		}
+	}
+	// REALITY pins the server key itself, so skip-cert-verify is meaningless
+	// there; only honour an explicit allowInsecure on a plain-TLS link.
+	if !isReality && query.Get("allowInsecure") == "1" {
+		p["skip-cert-verify"] = true
+	}
+	if isReality {
+		reality := map[string]any{}
+		if pbk := query.Get("pbk"); pbk != "" {
+			reality["public-key"] = forceStr(pbk)
+		}
+		if sid := query.Get("sid"); sid != "" {
+			reality["short-id"] = forceStr(sid)
+		}
+		if len(reality) > 0 {
+			p["reality-opts"] = reality
+		}
+	}
+
+	path := query.Get("path")
+	hostHeader := query.Get("host")
+	switch network {
+	case "ws":
+		ws := map[string]any{}
+		if path != "" {
+			ws["path"] = path
+		}
+		if hostHeader != "" {
+			ws["headers"] = map[string]any{"Host": hostHeader}
+		}
+		if len(ws) > 0 {
+			p["ws-opts"] = ws
+		}
+	case "grpc":
+		if svc := query.Get("serviceName"); svc != "" {
+			p["grpc-opts"] = map[string]any{"grpc-service-name": svc}
+		}
+	case "h2", "http":
+		h2 := map[string]any{}
+		if path != "" {
+			h2["path"] = path
+		}
+		if hostHeader != "" {
+			h2["host"] = []string{hostHeader}
 		}
 		if len(h2) > 0 {
 			p["h2-opts"] = h2
