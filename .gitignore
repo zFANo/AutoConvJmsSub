@@ -10,6 +10,13 @@ clash.yaml
 /autoconv.exe
 /AutoConvJmsSub
 /AutoConvJmsSub.exe
+/autoconv-gui.exe
+
+# Release artifacts — rebuild from source, never commit
+/dist/
+
+# GUI startup log, written next to the executable at runtime
+gui-debug.log
 
 # Go build cache / coverage
 *.test
