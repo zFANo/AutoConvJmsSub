@@ -285,10 +285,16 @@ func TryParseSubscription(raw string) (string, error) {
 	})
 }
 
-// TryParseSubscriptionWithOptions is the full-options variant.
+// TryParseSubscriptionWithOptions is the full-options variant. It dispatches
+// on the upstream format: a provider-supplied Clash profile is preferred and
+// rebuilt by ConvertClashProfile, while a base64 link bundle falls back to
+// the link parsers below.
 func TryParseSubscriptionWithOptions(raw string, opts ConvertOptions) (string, error) {
 	if opts.RuleProvidersBaseURL == "" {
 		opts.RuleProvidersBaseURL = defaultLoyalsoldierBaseURL
+	}
+	if looksLikeClashProfile(raw) {
+		return ConvertClashProfile(raw, opts)
 	}
 	decoded, err := decodeBase64Relaxed(strings.TrimSpace(raw))
 	if err != nil {
